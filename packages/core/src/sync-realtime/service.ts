@@ -417,7 +417,9 @@ export class RealtimeSyncService extends Emittery<RealtimeSyncEvents> {
 
       this.emit("realtimeCheckpoint", {
         blockNumber: hexToNumber(newBlockWithTransactions.number),
-        blockTimestamp: hexToNumber(newBlockWithTransactions.timestamp),
+        blockTimestamp:
+          hexToNumber(newBlockWithTransactions.timestamp) -
+          (this.network.fastChainMode ? 1 : 0),
       });
 
       // Add this block the local chain.

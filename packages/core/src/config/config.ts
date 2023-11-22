@@ -182,6 +182,8 @@ export type Network = {
   pollingInterval?: number;
   /** Maximum concurrency of RPC requests during the historical sync. Default: `10`. */
   maxRpcRequestConcurrency?: number;
+  /** Whether to operate in fast-chain mode, wherein only the block the second before the current head will be processed, which introduces some delay but allows fast-chains to currently operate. */
+  fastChainMode?: boolean;
 };
 
 type Option = {

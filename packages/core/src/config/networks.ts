@@ -12,6 +12,7 @@ export type Network = {
   defaultMaxBlockRange: number;
   maxRpcRequestConcurrency: number;
   finalityBlockCount: number;
+  fastChainMode: boolean;
 };
 
 export function buildNetwork({
@@ -57,6 +58,7 @@ export function buildNetwork({
     defaultMaxBlockRange: getDefaultMaxBlockRange({ chainId, rpcUrls }),
     maxRpcRequestConcurrency: network.maxRpcRequestConcurrency ?? 10,
     finalityBlockCount: getFinalityBlockCount({ chainId }),
+    fastChainMode: network.fastChainMode ?? false,
   };
 
   return resolvedNetwork;
