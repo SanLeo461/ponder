@@ -1,10 +1,10 @@
 import request from "supertest";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { setupIndexingStore } from "@/_test/setup.js";
 import type { IndexingStore } from "@/indexing-store/store.js";
 import type { Common } from "@/Ponder.js";
-import * as p from "@/schema/index.js";
+import { createSchema } from "@/schema/schema.js";
 import { range } from "@/utils/range.js";
 
 import { buildGqlSchema } from "./graphql/schema.js";
@@ -12,7 +12,7 @@ import { ServerService } from "./service.js";
 
 beforeEach((context) => setupIndexingStore(context));
 
-const s = p.createSchema({
+const s = createSchema((p) => ({
   TestEnum: p.createEnum(["ZERO", "ONE", "TWO"]),
   TestEntity: p.createTable({
     id: p.string(),
@@ -28,15 +28,16 @@ const s = p.createSchema({
     booleanList: p.boolean().list(),
     bytesList: p.bytes().list(),
     enum: p.enum("TestEnum"),
-    derived: p.virtual("EntityWithBigIntId.testEntityId"),
+    derived: p.many("EntityWithBigIntId.testEntityId"),
   }),
   EntityWithIntId: p.createTable({ id: p.int() }),
 
   EntityWithBigIntId: p.createTable({
     id: p.bigint(),
     testEntityId: p.string().references("TestEntity.id"),
+    testEntity: p.one("testEntityId"),
   }),
-});
+}));
 
 const graphqlSchema = buildGqlSchema(s);
 
@@ -57,7 +58,7 @@ const setup = async ({
 
   const service = new ServerService({ common, indexingStore });
   await service.start();
-  service.reload({ graphqlSchema });
+  service.reloadGraphqlSchema({ graphqlSchema });
 
   if (options.hasCompletedHistoricalIndexing) {
     service.setIsHistoricalIndexingComplete();
@@ -124,6 +125,7 @@ const setup = async ({
   };
 };
 
+// Graphql routes.
 test("serves all scalar types correctly", async (context) => {
   const { common, indexingStore } = context;
   const { service, gql, createTestEntity } = await setup({
@@ -1572,6 +1574,77 @@ test.skip("serves derived entities versioned at provided timestamp", async (cont
     id: "0",
     derivedTestEntity: [],
   });
+
+  await service.kill();
+});
+
+// Admin routes.
+test("/admin/reload emits chainIds in reload event", async (context) => {
+  const { common, indexingStore } = context;
+  const { service } = await setup({
+    common,
+    indexingStore,
+    options: {
+      hasCompletedHistoricalIndexing: false,
+    },
+  });
+  service.registerDevRoutes();
+
+  const emitSpy = vi.spyOn(service, "emit");
+
+  await request(service.app)
+    .post("/admin/reload")
+    .query({ chainId: "1" })
+    .expect(200);
+
+  expect(emitSpy).toHaveBeenCalledWith("admin:reload", {
+    chainId: 1,
+  });
+
+  await service.kill();
+});
+
+test("/admin/reload fails with non-integer chain IDs", async (context) => {
+  const { common, indexingStore } = context;
+  const { service } = await setup({
+    common,
+    indexingStore,
+    options: {
+      hasCompletedHistoricalIndexing: false,
+    },
+  });
+  service.registerDevRoutes();
+
+  const emitSpy = vi.spyOn(service, "emit");
+
+  await request(service.app)
+    .post("/admin/reload")
+    .query({ chainId: "badchainid" })
+    .expect(400);
+
+  expect(emitSpy).not.toHaveBeenCalled();
+
+  await service.kill();
+});
+
+test("/admin/reload does not exist if dev routes aren't registered", async (context) => {
+  const { common, indexingStore } = context;
+  const { service } = await setup({
+    common,
+    indexingStore,
+    options: {
+      hasCompletedHistoricalIndexing: false,
+    },
+  });
+
+  const emitSpy = vi.spyOn(service, "emit");
+
+  await request(service.app)
+    .post("/admin/reload")
+    .query({ chainId: "badchainid" })
+    .expect(404);
+
+  expect(emitSpy).not.toHaveBeenCalled();
 
   await service.kill();
 });

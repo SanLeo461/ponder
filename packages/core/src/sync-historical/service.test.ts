@@ -3,6 +3,7 @@ import {
   HttpRequestError,
   InvalidParamsRpcError,
 } from "viem";
+import { rpc } from "viem/utils";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import {
@@ -21,7 +22,9 @@ beforeEach((context) => setupSyncStore(context));
 const network: Network = {
   name: "mainnet",
   chainId: 1,
-  client: publicClient,
+  request: (options) =>
+    rpc.http(publicClient.chain.rpcUrls.default.http[0], options),
+  url: publicClient.chain.rpcUrls.default.http[0],
   pollingInterval: 1_000,
   defaultMaxBlockRange: 100,
   finalityBlockCount: 10,
@@ -29,7 +32,7 @@ const network: Network = {
 };
 
 const rpcRequestSpy = vi.spyOn(
-  network.client as { request: EIP1193RequestFn },
+  network as { request: EIP1193RequestFn },
   "request",
 );
 

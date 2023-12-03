@@ -105,38 +105,45 @@ export class Ponder {
     const database = buildDatabase({ common: this.common, config });
     this.syncStore =
       syncStore ??
-      (database.kind === "sqlite"
-        ? new SqliteSyncStore({ common: this.common, db: database.db })
-        : new PostgresSyncStore({ common: this.common, pool: database.pool }));
-
+      (database.sync.kind === "sqlite"
+        ? new SqliteSyncStore({ common: this.common, file: database.sync.file })
+        : new PostgresSyncStore({
+            common: this.common,
+            pool: database.sync.pool,
+          }));
     this.indexingStore =
       indexingStore ??
-      (database.kind === "sqlite"
-        ? new SqliteIndexingStore({ common: this.common, db: database.db })
+      (database.indexing.kind === "sqlite"
+        ? new SqliteIndexingStore({
+            common: this.common,
+            file: database.indexing.file,
+          })
         : new PostgresIndexingStore({
             common: this.common,
-            pool: database.pool,
+            pool: database.indexing.pool,
           }));
 
     this.sources = buildSources({ config });
 
-    const networksToSync = Object.entries(config.networks)
-      .map(([networkName, network]) =>
-        buildNetwork({ networkName, network, common: this.common }),
+    const networksToSync = (
+      await Promise.all(
+        Object.entries(config.networks).map(
+          async ([networkName, network]) =>
+            await buildNetwork({ networkName, network, common: this.common }),
+        ),
       )
-      .filter((network) => {
-        const hasSources = this.sources.some(
-          (source) => source.networkName === network.name,
-        );
-        if (!hasSources) {
-          this.common.logger.warn({
-            service: "app",
-            msg: `No contracts found (network=${network.name})`,
-          });
-        }
-        return hasSources;
-      });
-
+    ).filter((network) => {
+      const hasSources = this.sources.some(
+        (source) => source.networkName === network.name,
+      );
+      if (!hasSources) {
+        this.common.logger.warn({
+          service: "app",
+          msg: `No contracts found (network=${network.name})`,
+        });
+      }
+      return hasSources;
+    });
     this.syncServices = networksToSync.map((network) => {
       const sourcesForNetwork = this.sources.filter(
         (source) => source.networkName === network.name,
@@ -179,6 +186,7 @@ export class Ponder {
       common: this.common,
       indexingStore: this.indexingStore,
     });
+
     this.codegenService = new CodegenService({ common: this.common });
     this.uiService = new UiService({
       common: this.common,
@@ -208,6 +216,7 @@ export class Ponder {
         databaseKind: this.syncStore.kind,
       },
     });
+    this.serverService.registerDevRoutes();
 
     await Promise.all(
       this.syncServices.map(async ({ historical, realtime }) => {
@@ -278,11 +287,14 @@ export class Ponder {
 
     const database = buildDatabase({ common: this.common, config });
     this.indexingStore =
-      database.kind === "sqlite"
-        ? new SqliteIndexingStore({ common: this.common, db: database.db })
+      database.indexing.kind === "sqlite"
+        ? new SqliteIndexingStore({
+            common: this.common,
+            file: database.indexing.file,
+          })
         : new PostgresIndexingStore({
             common: this.common,
-            pool: database.pool,
+            pool: database.indexing.pool,
           });
 
     this.serverService = new ServerService({
@@ -298,7 +310,7 @@ export class Ponder {
     // to the findUnique and findMany functions without having to change the API.
     this.indexingStore.schema = schema;
 
-    this.serverService.reload({ graphqlSchema });
+    this.serverService.reloadGraphqlSchema({ graphqlSchema });
 
     this.common.telemetry.record({
       event: "App Started",
@@ -358,7 +370,7 @@ export class Ponder {
 
       this.codegenService.generateGraphqlSchemaFile({ graphqlSchema });
 
-      this.serverService.reload({ graphqlSchema });
+      this.serverService.reloadGraphqlSchema({ graphqlSchema });
 
       await this.indexingService.reset({ schema });
       await this.indexingService.processEvents();
@@ -432,6 +444,62 @@ export class Ponder {
       ) {
         this.serverService.setIsHistoricalIndexingComplete();
       }
+    });
+
+    // Server listeners.
+    this.serverService.on("admin:reload", async ({ chainId }) => {
+      const syncServiceForChainId = this.syncServices.find(
+        ({ network }) => network.chainId === chainId,
+      );
+      if (!syncServiceForChainId) {
+        this.common.logger.warn({
+          service: "server",
+          msg: `No network defined for chainId: ${chainId}`,
+        });
+        return;
+      }
+
+      // Clear all the metrics for the sources.
+      syncServiceForChainId.sources.forEach(({ networkName, contractName }) => {
+        this.common.metrics.ponder_historical_total_blocks.set(
+          { network: networkName, contract: contractName },
+          0,
+        );
+        this.common.metrics.ponder_historical_completed_blocks.set(
+          { network: networkName, contract: contractName },
+          0,
+        );
+        this.common.metrics.ponder_historical_cached_blocks.set(
+          { network: networkName, contract: contractName },
+          0,
+        );
+      });
+
+      await this.syncStore.deleteRealtimeData({
+        chainId,
+        fromBlock: BigInt(0),
+      });
+
+      this.syncGatewayService.resetCheckpoints({ chainId });
+
+      // Reload the sync services for the specific chain by killing, setting up, and then starting again.
+      await syncServiceForChainId.realtime.kill();
+      await syncServiceForChainId.historical.kill();
+
+      const blockNumbers = await syncServiceForChainId.realtime.setup();
+      await syncServiceForChainId.historical.setup(blockNumbers);
+
+      await syncServiceForChainId.realtime.start();
+      syncServiceForChainId.historical.start();
+
+      // NOTE: We have to reset the historical state after restarting the sync services
+      // otherwise the state will be out of sync.
+      this.uiService.resetHistoricalState();
+
+      // Reload the indexing service with existing schema. We use the exisiting schema as there is
+      // alternative resetting behavior for a schema change.
+      await this.indexingService.reset();
+      await this.indexingService.processEvents();
     });
   }
 }

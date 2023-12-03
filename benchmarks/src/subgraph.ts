@@ -1,21 +1,16 @@
-import execa from "execa";
-import parsePrometheusTextFormat from "parse-prometheus-text-format";
+import { readFileSync, writeFileSync } from "node:fs";
 
-import { FORK_BLOCK_NUMBER } from "./anvil";
+import { execa } from "execa";
+
 import { fetchGraphql, fetchWithTimeout, startClock } from "./utils";
 
-const START_BLOCK = 17500000;
-const END_BLOCK = Number(FORK_BLOCK_NUMBER);
-
-const fetchSubgraphLatestBlockNumber = async () => {
+const fetchSubgraphSynced = async () => {
   try {
     const response = await fetchGraphql(
-      "http://localhost:8000/subgraphs/name/ponder-benchmarks/subgraph",
+      "http://localhost:8030/graphql",
       `{
-        _meta {
-          block {
-            number
-          }
+        indexingStatusForCurrentVersion(subgraphName:"ponder-benchmarks/subgraph") {
+          synced
         }
       }`,
     );
@@ -34,9 +29,9 @@ const fetchSubgraphLatestBlockNumber = async () => {
       }
     }
 
-    const blockNumber = response.data?._meta?.block?.number;
+    const synced = response.data?.indexingStatusForCurrentVersion?.synced;
 
-    return blockNumber as number;
+    return synced;
   } catch (err) {
     return 0;
   }
@@ -45,14 +40,13 @@ const fetchSubgraphLatestBlockNumber = async () => {
 const fetchSubgraphMetrics = async () => {
   const metricsResponse = await fetchWithTimeout("http://localhost:8040");
   const metricsRaw = await metricsResponse.text();
-  const metrics = parsePrometheusTextFormat(metricsRaw) as any[];
-  return metrics;
+  return metricsRaw.split("\n");
 };
 
 const waitForGraphNode = async () => {
   const endClock = startClock();
   return new Promise<number>((resolve, reject) => {
-    let timeout = undefined;
+    let timeout: NodeJS.Timeout | undefined = undefined;
     const interval = setInterval(async () => {
       try {
         const metrics = await fetchSubgraphMetrics();
@@ -69,43 +63,30 @@ const waitForGraphNode = async () => {
     timeout = setTimeout(() => {
       clearInterval(interval);
       reject(new Error("Timed out waiting for Graph Node to start"));
-    }, 15_000);
+    }, 30_000);
   });
 };
 
 const waitForSyncComplete = async () => {
   const endClock = startClock();
-  let duration: number;
+  let duration: number = 0;
 
-  await new Promise((resolve, reject) => {
-    let timeout = undefined;
+  await new Promise((resolve) => {
     const interval = setInterval(async () => {
-      const latestSyncedBlockNumber = await fetchSubgraphLatestBlockNumber();
-      console.log(
-        `Latest synced block number: ${latestSyncedBlockNumber}/${END_BLOCK}`,
-      );
-
-      if (latestSyncedBlockNumber >= END_BLOCK) {
+      if (await fetchSubgraphSynced()) {
         duration = endClock();
         clearInterval(interval);
-        clearTimeout(timeout);
         resolve(undefined);
       }
     }, 1_000);
-
-    timeout = setTimeout(() => {
-      clearInterval(interval);
-      reject(new Error("Timed out waiting for subgraph to sync"));
-    }, 60_000);
   });
 
   return duration;
 };
 
-export const subgraph = async () => {
+const subgraph = async () => {
   console.log(`Waiting for Graph Node to be ready...`);
   const setupDuration = await waitForGraphNode();
-  console.log(`Graph Node ready (waited for ${setupDuration}ms)`);
 
   console.log("Registering subgraph...");
   await execa(
@@ -136,5 +117,35 @@ export const subgraph = async () => {
   );
 
   const duration = await waitForSyncComplete();
-  console.log(`Subgraph synced in: ${duration}`);
+
+  const metrics = (await fetchSubgraphMetrics()).filter((m) =>
+    m.includes("endpoint_request"),
+  );
+
+  return { setupDuration, duration, metrics };
 };
+
+const changeMappingFileDelim = (delim: string) => {
+  let mappingFileContents = readFileSync("./subgraph/src/mapping.ts", {
+    encoding: "utf-8",
+  });
+  mappingFileContents = mappingFileContents.replace(/(dif:.)/g, `dif:${delim}`);
+
+  writeFileSync("./subgraph/src/mapping.ts", mappingFileContents, "utf-8");
+};
+
+const bench = async () => {
+  // Reset handler delimeter
+  changeMappingFileDelim("-");
+
+  const subgraphCold = await subgraph();
+
+  // Force handler cache invalidation
+  changeMappingFileDelim("+");
+
+  const subgraphHot = await subgraph();
+
+  console.log({ subgraphCold, subgraphHot });
+};
+
+await bench();

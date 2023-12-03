@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { type EIP1193RequestFn, HttpRequestError, parseAbi } from "viem";
+import { rpc } from "viem/utils";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import {
@@ -23,7 +24,9 @@ beforeEach(resetTestClient);
 const network: Network = {
   name: "mainnet",
   chainId: 1,
-  client: publicClient,
+  request: (options) =>
+    rpc.http(publicClient.chain.rpcUrls.default.http[0], options),
+  url: publicClient.chain.rpcUrls.default.http[0],
   pollingInterval: 1_000,
   defaultMaxBlockRange: 3,
   finalityBlockCount: 5,
@@ -31,7 +34,7 @@ const network: Network = {
 };
 
 const rpcRequestSpy = vi.spyOn(
-  network.client as { request: EIP1193RequestFn },
+  network as { request: EIP1193RequestFn },
   "request",
 );
 
